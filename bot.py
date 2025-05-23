@@ -2,11 +2,15 @@ import telegram
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, PollHandler
 import re
 import random
-from config import TOKEN
+from config import TOKEN, PROXY_URL
 import json
 import logging
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+from requests import Session
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class QuizBot:
     def __init__(self):
@@ -66,17 +70,23 @@ class QuizBot:
             return
 
         quiz = self.quizzes[self.current_quiz]
-        message = context.bot.send_poll(
-            chat_id=chat_id,
-            question=quiz['question'],
-            options=quiz['answers'],
-            type=telegram.Poll.QUIZ,
-            correct_option_id=quiz['correct'],
-            is_anonymous=False,
-            explanation="Check the current affairs data for details."
-        )
-        context.bot_data[message.poll.id] = chat_id
-        self.current_quiz += 1
+        try:
+            message = context.bot.send_poll(
+                chat_id=chat_id,
+                question=quiz['question'],
+                options=quiz['answers'],
+                type=telegram.Poll.QUIZ,
+                correct_option_id=quiz['correct'],
+                is_anonymous=False,
+                explanation="Check the current affairs data for details.",
+                timeout=30  # Increased timeout
+            )
+            context.bot_data[message.poll.id] = chat_id
+            self.current_quiz += 1
+        except telegram.error.NetworkError as e:
+            logger.error(f"Network error sending poll: {e}")
+            context.bot.send_message(chat_id=chat_id, text="Network issue. Retrying in 10 seconds...")
+            context.job_queue.run_once(lambda _: self.send_quiz(update, context, chat_id), 10)
 
     def handle_poll_answer(self, update, context):
         poll = update.poll
@@ -91,7 +101,18 @@ class QuizBot:
             self.send_quiz(update, context, chat_id)
 
 def main():
-    updater = Updater(TOKEN, use_context=True)
+    # Configure retries for network requests
+    retries = Retry(total=5, backoff_factor=2, status_forcelist=[429, 500, 502, 503, 504])
+    session = Session()
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    
+    # Apply proxy if provided
+    request_kwargs = {'session': session}
+    if PROXY_URL:
+        request_kwargs['proxy_url'] = PROXY_URL
+        logger.info(f"Using proxy: {PROXY_URL}")
+    
+    updater = Updater(TOKEN, use_context=True, request_kwargs=request_kwargs)
     dp = updater.dispatcher
     bot = QuizBot()
 
@@ -100,8 +121,13 @@ def main():
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, bot.receive_data))
     dp.add_handler(PollHandler(bot.handle_poll_answer, pass_chat_data=True, pass_user_data=True))
 
-    updater.start_polling()
-    updater.idle()
+    try:
+        updater.start_polling(timeout=30)  # Increased polling timeout
+        logger.info("Bot started polling")
+        updater.idle()
+    except telegram.error.NetworkError as e:
+        logger.error(f"Failed to start polling: {e}")
+        raise
 
 if __name__ == "__main__":
     main()
