@@ -1,11 +1,20 @@
 import telegram
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, PollHandler, JobQueue
-import spacy
+import requests
 import random
-from config import TOKEN
+from config import TOKEN, XAI_API_KEY
 import json
 import logging
 import re
+import nltk
+from nltk.tokenize import sent_tokenize, word_tokenize
+from nltk.corpus import stopwords
+import time
+from datetime import datetime, timedelta
+
+# Download NLTK resources
+nltk.download('punkt')
+nltk.download('stopwords')
 
 # Configure detailed logging
 logging.basicConfig(
@@ -18,90 +27,80 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load spaCy model with error handling
-try:
-    nlp = spacy.load("en_core_web_sm")
-    logger.info("Successfully loaded spaCy en_core_web_sm model")
-except OSError as e:
-    logger.error(f"Failed to load spaCy model: {e}")
-    nlp = None
-
 class QuizBot:
     def __init__(self):
         self.quizzes = []
         self.current_quiz = None
         self.user_data = {}
+        self.question_timeout = 30  # Seconds per question
+
+    def call_xai_api(self, text):
+        """Use xAI API for text analysis."""
+        if not XAI_API_KEY:
+            logger.warning("xAI API key missing. Falling back to NLTK.")
+            return None
+        try:
+            headers = {"Authorization": f"Bearer {XAI_API_KEY}"}
+            payload = {
+                "model": "grok-3",
+                "messages": [{
+                    "role": "user",
+                    "content": f"Extract key facts (names, numbers, events, locations) from this text for quiz generation. Support Hindi and English. Output as JSON: {text}"
+                }]
+            }
+            response = requests.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            return data['choices'][0]['message']['content']
+        except Exception as e:
+            logger.error(f"xAI API error: {e}")
+            return None
 
     def extract_quiz_data(self, text):
-        """Generate quizzes from unstructured current affairs text with deep analysis."""
+        """Generate quizzes from unstructured current affairs text."""
         logger.debug(f"Processing input text: {text[:1000]}...")
         quizzes = []
 
-        if not nlp:
-            logger.warning("spaCy model unavailable. Using fallback method.")
-            return self.fallback_quiz_extraction(text)
+        # Try xAI API first
+        xai_result = self.call_xai_api(text)
+        if xai_result:
+            try:
+                facts = json.loads(xai_result)
+                logger.debug(f"xAI extracted facts: {facts}")
+                quizzes.extend(self.generate_quizzes_from_facts(facts))
+            except json.JSONDecodeError:
+                logger.error("Invalid JSON from xAI API. Using fallback.")
+        else:
+            logger.info("Using NLTK fallback for quiz generation")
+            quizzes.extend(self.fallback_quiz_extraction(text))
 
-        doc = nlp(text)
-        sentences = [sent.text.strip() for sent in doc.sents if len(sent.text.strip()) > 20]
-        entities = [(ent.text, ent.label_) for ent in doc.ents]
-        logger.debug(f"Extracted {len(sentences)} sentences and {len(entities)} entities")
+        logger.debug(f"Generated {len(quizzes)} quizzes")
+        return quizzes[:10]
 
-        for i, sentence in enumerate(sentences[:10]):
-            sent_doc = nlp(sentence)
-            sent_entities = [(ent.text, ent.label_) for ent in sent_doc.ents]
-            logger.debug(f"Sentence {i+1}: {sentence}")
-            logger.debug(f"Entities in sentence: {sent_entities}")
-
+    def generate_quizzes_from_facts(self, facts):
+        """Generate quizzes from xAI API facts."""
+        quizzes = []
+        for fact in facts.get('facts', []):
             question = None
             correct_answer = None
             incorrect_answers = []
 
-            for entity, label in sent_entities:
-                entity_lower = entity.lower()
-                sentence_lower = sentence.lower()
-                if label in ["PERSON", "GPE", "ORG", "DATE", "EVENT"]:
-                    if label == "PERSON" and any(k in sentence_lower for k in ["inaugurat", "launch", "open"]):
-                        question = f"Who inaugurated the event or project mentioned on {entity}?"
-                        correct_answer = entity
-                        incorrect_answers = [e[0] for e in entities if e[1] == "PERSON" and e[0] != entity]
-                        incorrect_answers.extend(["Rahul Gandhi", "Amit Shah", "Sonia Gandhi"][:3-len(incorrect_answers)])
-                        logger.debug(f"Generated person-based question: {question}")
-                        break
-                    elif label == "GPE" and any(k in sentence_lower for k in ["stadium", "center", "project"]):
-                        question = f"In which city was the {entity} project or event held?"
-                        correct_answer = entity
-                        incorrect_answers = [e[0] for e in entities if e[1] == "GPE" and e[0] != entity]
-                        incorrect_answers.extend(["Delhi", "Kolkata", "Chennai"][:3-len(incorrect_answers)])
-                        logger.debug(f"Generated location-based question: {question}")
-                        break
-                    elif label == "ORG" and any(k in sentence_lower for k in ["collaborat", "partner", "program"]):
-                        question = f"Which organization collaborated on the program mentioned with {entity}?"
-                        correct_answer = entity
-                        incorrect_answers = [e[0] for e in entities if e[1] == "ORG" and e[0] != entity]
-                        incorrect_answers.extend(["TCS", "Infosys", "Wipro"][:3-len(incorrect_answers)])
-                        logger.debug(f"Generated organization-based question: {question}")
-                        break
-
-            if not question:
-                numbers = re.findall(r'\d+\.?\d*', sentence)
-                sentence_lower = sentence.lower()
-                if numbers and any(keyword in sentence_lower for keyword in ["crore", "percent", "km", "%"]):
-                    number = numbers[0]
-                    if "crore" in sentence_lower:
-                        question = f"What is the approximate budget mentioned in the news?"
-                        correct_answer = f"{number} crore"
-                        incorrect_answers = [f"{float(number)*2} crore", f"{float(number)/2} crore", f"{float(number)+100} crore"]
-                        logger.debug(f"Generated crore-based question: {question}")
-                    elif any(k in sentence_lower for k in ["percent", "%"]):
-                        question = f"What is the projected percentage value mentioned in the news?"
-                        correct_answer = f"{number}%"
-                        incorrect_answers = [f"{float(number)+1}%", f"{float(number)-1}%", f"{float(number)+2}%"]
-                        logger.debug(f"Generated percent-based question: {question}")
-                    elif "km" in sentence_lower:
-                        question = f"What is the length of the project mentioned in the news?"
-                        correct_answer = f"{number} km"
-                        incorrect_answers = [f"{float(number)*2} km", f"{float(number)/2} km", f"{float(number)+10} km"]
-                        logger.debug(f"Generated km-based question: {question}")
+            if fact.get('type') == 'person' and fact.get('context') in ['inaugurated', 'launched', 'started']:
+                question = f"Who {fact['context']} the event mentioned in the news?"
+                correct_answer = fact['value']
+                incorrect_answers = ["Rahul Gandhi", "Amit Shah", "Sonia Gandhi"]
+            elif fact.get('type') == 'location' and fact.get('context') in ['project', 'event', 'stadium']:
+                question = f"In which location was the {fact['context']} mentioned in the news held?"
+                correct_answer = fact['value']
+                incorrect_answers = ["Delhi", "Kolkata", "Chennai"]
+            elif fact.get('type') == 'number' and fact.get('unit') == 'crore':
+                question = f"What is the approximate budget mentioned in the news?"
+                correct_answer = f"{fact['value']} crore"
+                incorrect_answers = [f"{float(fact['value'])*2} crore", f"{float(fact['value'])/2} crore", f"{float(fact['value'])+100} crore"]
+            elif fact.get('type') == 'number' and fact.get('unit') in ['percent', '%']:
+                question = f"What is the projected percentage value mentioned in the news?"
+                correct_answer = f"{fact['value']}%"
+                incorrect_answers = [f"{float(fact['value'])+1}%", f"{float(fact['value'])-1}%", f"{float(fact['value'])+2}%"]
 
             if question and correct_answer and len(incorrect_answers) >= 3:
                 answers = incorrect_answers[:3] + [correct_answer]
@@ -112,15 +111,14 @@ class QuizBot:
                     'answers': answers,
                     'correct': correct_idx
                 })
-                logger.debug(f"Added quiz: {question} | Correct: {correct_answer}")
-
-        return quizzes[:10]
+                logger.debug(f"xAI quiz: {question} | Correct: {correct_answer}")
+        return quizzes
 
     def fallback_quiz_extraction(self, text):
-        """Fallback method for Hindi and English text without spaCy."""
-        logger.debug("Using fallback quiz extraction")
+        """Fallback method using NLTK for Hindi and English text."""
+        logger.debug("Using NLTK fallback quiz extraction")
         quizzes = []
-        sentences = re.split(r'\n|\।\s+|\.\s+', text)
+        sentences = sent_tokenize(text)
         sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
         logger.debug(f"Fallback: Extracted {len(sentences)} sentences")
 
@@ -131,8 +129,12 @@ class QuizBot:
             "सहयोग": "collaborated",
             "प्रतिशत": "percent",
             "करोड़": "crore",
-            "किलोमीटर": "km"
+            "किलोमीटर": "km",
+            "सम्मानित": "honored",
+            "परियोजना": "project"
         }
+
+        stop_words = set(stopwords.words('english')).union(['है', 'के', 'में', 'से', 'का', 'की', 'को'])
 
         for i, sentence in enumerate(sentences[:10]):
             question = None
@@ -140,13 +142,26 @@ class QuizBot:
             incorrect_answers = []
             sentence_lower = sentence.lower()
 
+            # Map Hindi keywords
             for hindi, english in hindi_keywords.items():
                 sentence_lower = sentence_lower.replace(hindi, english)
 
+            # Tokenize and extract names
+            tokens = word_tokenize(sentence)
+            names = [t for t in tokens if t[0].isupper() or t[0] in 'ऀ-ॿ' and t not in stop_words]
             numbers = re.findall(r'\d+\.?\d*', sentence_lower)
-            logger.debug(f"Sentence {i+1}: {sentence} | Numbers: {numbers}")
+            logger.debug(f"Sentence {i+1}: {sentence} | Names: {names} | Numbers: {numbers}")
 
-            if numbers:
+            # Person-based questions
+            if names and any(k in sentence_lower for k in ["inaugurated", "launched", "started", "honored"]):
+                correct_answer = names[0]
+                question = f"Who was involved in the event mentioned in the news?"
+                incorrect_answers = names[1:3] if len(names) > 1 else []
+                incorrect_answers.extend(["Rahul Gandhi", "Amit Shah", "Sonia Gandhi"][:3-len(incorrect_answers)])
+                logger.debug(f"Fallback: Generated person-based question: {question}")
+
+            # Numeric questions
+            elif numbers:
                 number = numbers[0]
                 if "crore" in sentence_lower:
                     question = f"What is the approximate budget mentioned in the news?"
@@ -164,15 +179,6 @@ class QuizBot:
                     incorrect_answers = [f"{float(number)*2} km", f"{float(number)/2} km", f"{float(number)+10} km"]
                     logger.debug(f"Fallback: Generated km-based question: {question}")
 
-            if not question:
-                names = re.findall(r'[A-Z][a-z]+ [A-Z][a-z]+|[\u0900-\u097F]+ [\u0900-\u097F]+', sentence)
-                if names and any(k in sentence_lower for k in ["inaugurated", "launched", "started"]):
-                    correct_answer = names[0]
-                    question = f"Who was involved in the event mentioned in the news?"
-                    incorrect_answers = names[1:3] if len(names) > 1 else []
-                    incorrect_answers.extend(["Rahul Gandhi", "Amit Shah", "Sonia Gandhi"][:3-len(incorrect_answers)])
-                    logger.debug(f"Fallback: Generated person-based question: {question}")
-
             if question and correct_answer and len(incorrect_answers) >= 3:
                 answers = incorrect_answers[:3] + [correct_answer]
                 random.shuffle(answers)
@@ -184,7 +190,6 @@ class QuizBot:
                 })
                 logger.debug(f"Fallback: Added quiz: {question} | Correct: {correct_answer}")
 
-        logger.debug(f"Fallback: Generated {len(quizzes)} quizzes")
         return quizzes[:10]
 
     def start(self, update, context):
@@ -201,7 +206,7 @@ class QuizBot:
                 json.dump(self.quizzes, f)
             logger.info(f"Saved {len(self.quizzes)} quizzes to quizzes.json")
         else:
-            update.message.reply_text("Could not generate quizzes. Please provide detailed current affairs text with numbers or names.")
+            update.message.reply_text("Could not generate quizzes. Please provide detailed current affairs text with numbers, names, or events.")
             logger.warning("No quizzes generated from input text")
 
     def generate_quiz(self, update, context):
@@ -215,18 +220,12 @@ class QuizBot:
         self.user_data[chat_id] = {'score': 0, 'total': len(self.quizzes)}
         logger.info(f"Starting quiz in chat {chat_id} with {len(self.quizzes)} questions")
         
-        context.job_queue.run_repeating(
-            self.send_quiz,
-            interval=15,
-            first=0,
-            context={'chat_id': chat_id, 'update': update},
-            name=f"quiz_{chat_id}"
-        )
+        # Start quiz immediately
+        self.send_quiz(context, {'chat_id': chat_id, 'update': update})
 
-    def send_quiz(self, context):
-        job = context.job
-        chat_id = job.context['chat_id']
-        update = job.context['update']
+    def send_quiz(self, context, job_context):
+        chat_id = job_context['chat_id']
+        update = job_context['update']
 
         if self.current_quiz >= len(self.quizzes):
             score = self.user_data[chat_id]['score']
@@ -234,11 +233,11 @@ class QuizBot:
             context.bot.send_message(chat_id=chat_id, text=f"Quiz finished! Your score: {score}/{total}")
             logger.info(f"Quiz finished in chat {chat_id}. Score: {score}/{total}")
             self.current_quiz = None
-            job.schedule_removal()
             return
 
         quiz = self.quizzes[self.current_quiz]
         try:
+            # Send poll
             message = context.bot.send_poll(
                 chat_id=chat_id,
                 question=quiz['question'],
@@ -247,19 +246,77 @@ class QuizBot:
                 correct_option_id=quiz['correct'],
                 is_anonymous=False,
                 explanation="Refer to the current affairs text for details.",
-                timeout=30
+                timeout=self.question_timeout
             )
             context.bot_data[message.poll.id] = chat_id
             logger.info(f"Sent quiz {self.current_quiz+1}/{len(self.quizzes)} to chat {chat_id}: {quiz['question']}")
+
+            # Send timer message
+            timer_message = context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Time remaining: {self.question_timeout} seconds"
+            )
+            context.job_queue.run_once(
+                self.update_timer,
+                1,
+                context={
+                    'chat_id': chat_id,
+                    'message_id': timer_message.message_id,
+                    'end_time': datetime.now() + timedelta(seconds=self.question_timeout)
+                },
+                name=f"timer_{chat_id}_{self.current_quiz}"
+            )
+
+            # Schedule next quiz
             self.current_quiz += 1
+            if self.current_quiz < len(self.quizzes):
+                context.job_queue.run_once(
+                    self.send_quiz,
+                    10,
+                    context=job_context,
+                    name=f"quiz_{chat_id}_{self.current_quiz}"
+                )
         except telegram.error.NetworkError as e:
             logger.error(f"Network error sending poll to chat {chat_id}: {e}")
             context.bot.send_message(chat_id=chat_id, text="Network issue. Retrying in 10 seconds...")
             context.job_queue.run_once(
-                lambda c: self.send_quiz(c),
+                self.send_quiz,
                 10,
-                context=job.context
+                context=job_context
             )
+
+    def update_timer(self, context):
+        job = context.job
+        chat_id = job.context['chat_id']
+        message_id = job.context['message_id']
+        end_time = job.context['end_time']
+        remaining = int((end_time - datetime.now()).total_seconds())
+
+        if remaining <= 0:
+            try:
+                context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text="Time's up!"
+                )
+            except telegram.error.BadRequest:
+                logger.debug(f"Timer message {message_id} already deleted or edited")
+            return
+
+        try:
+            context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"Time remaining: {remaining} seconds"
+            )
+            context.job_queue.run_once(
+                self.update_timer,
+                1,
+                context=job.context,
+                name=f"timer_{chat_id}_{self.current_quiz}"
+            )
+        except telegram.error.BadRequest:
+            logger.debug(f"Timer message {message_id} already deleted or edited")
 
     def handle_poll_answer(self, update, context):
         poll = update.poll
