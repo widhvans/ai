@@ -6,7 +6,6 @@ from config import TOKEN
 import json
 import logging
 import re
-import time
 
 # Configure detailed logging
 logging.basicConfig(
@@ -35,20 +34,18 @@ class QuizBot:
 
     def extract_quiz_data(self, text):
         """Generate quizzes from unstructured current affairs text with deep analysis."""
-        logger.debug(f"Processing input text: {text[:1000]}...")  # Log first 1000 chars
+        logger.debug(f"Processing input text: {text[:1000]}...")
         quizzes = []
 
         if not nlp:
             logger.warning("spaCy model unavailable. Using fallback method.")
             return self.fallback_quiz_extraction(text)
 
-        # Process with spaCy for English or transliterated text
         doc = nlp(text)
         sentences = [sent.text.strip() for sent in doc.sents if len(sent.text.strip()) > 20]
         entities = [(ent.text, ent.label_) for ent in doc.ents]
         logger.debug(f"Extracted {len(sentences)} sentences and {len(entities)} entities")
 
-        # Generate quizzes from English or transliterated content
         for i, sentence in enumerate(sentences[:10]):
             sent_doc = nlp(sentence)
             sent_entities = [(ent.text, ent.label_) for ent in sent_doc.ents]
@@ -59,7 +56,6 @@ class QuizBot:
             correct_answer = None
             incorrect_answers = []
 
-            # Strategy 1: Entity-based questions (e.g., person, place, organization)
             for entity, label in sent_entities:
                 entity_lower = entity.lower()
                 sentence_lower = sentence.lower()
@@ -86,7 +82,6 @@ class QuizBot:
                         logger.debug(f"Generated organization-based question: {question}")
                         break
 
-            # Strategy 2: Numeric questions (e.g., budget, percentage, distance)
             if not question:
                 numbers = re.findall(r'\d+\.?\d*', sentence)
                 sentence_lower = sentence.lower()
@@ -108,7 +103,6 @@ class QuizBot:
                         incorrect_answers = [f"{float(number)*2} km", f"{float(number)/2} km", f"{float(number)+10} km"]
                         logger.debug(f"Generated km-based question: {question}")
 
-            # Ensure valid quiz
             if question and correct_answer and len(incorrect_answers) >= 3:
                 answers = incorrect_answers[:3] + [correct_answer]
                 random.shuffle(answers)
@@ -126,12 +120,10 @@ class QuizBot:
         """Fallback method for Hindi and English text without spaCy."""
         logger.debug("Using fallback quiz extraction")
         quizzes = []
-        # Split into sentences (handles Hindi and English)
         sentences = re.split(r'\n|\।\s+|\.\s+', text)
         sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
         logger.debug(f"Fallback: Extracted {len(sentences)} sentences")
 
-        # Hindi keywords for key events
         hindi_keywords = {
             "उद्घाटन": "inaugurated",
             "लॉन्च": "launched",
@@ -148,11 +140,9 @@ class QuizBot:
             incorrect_answers = []
             sentence_lower = sentence.lower()
 
-            # Translate Hindi keywords to English for processing
             for hindi, english in hindi_keywords.items():
                 sentence_lower = sentence_lower.replace(hindi, english)
 
-            # Extract numbers and context
             numbers = re.findall(r'\d+\.?\d*', sentence_lower)
             logger.debug(f"Sentence {i+1}: {sentence} | Numbers: {numbers}")
 
@@ -174,9 +164,7 @@ class QuizBot:
                     incorrect_answers = [f"{float(number)*2} km", f"{float(number)/2} km", f"{float(number)+10} km"]
                     logger.debug(f"Fallback: Generated km-based question: {question}")
 
-            # Attempt to extract names for person-based questions (Hindi or English)
             if not question:
-                # Simple regex for names (Hindi or English proper nouns)
                 names = re.findall(r'[A-Z][a-z]+ [A-Z][a-z]+|[\u0900-\u097F]+ [\u0900-\u097F]+', sentence)
                 if names and any(k in sentence_lower for k in ["inaugurated", "launched", "started"]):
                     correct_answer = names[0]
@@ -227,7 +215,6 @@ class QuizBot:
         self.user_data[chat_id] = {'score': 0, 'total': len(self.quizzes)}
         logger.info(f"Starting quiz in chat {chat_id} with {len(self.quizzes)} questions")
         
-        # Schedule quizzes to be sent every 15 seconds
         context.job_queue.run_repeating(
             self.send_quiz,
             interval=15,
@@ -247,7 +234,6 @@ class QuizBot:
             context.bot.send_message(chat_id=chat_id, text=f"Quiz finished! Your score: {score}/{total}")
             logger.info(f"Quiz finished in chat {chat_id}. Score: {score}/{total}")
             self.current_quiz = None
-            # Stop the job
             job.schedule_removal()
             return
 
