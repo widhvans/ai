@@ -2,7 +2,7 @@ import telegram
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, PollHandler
 import re
 import random
-from config import TOKEN, PROXY_URL
+from config import TOKEN
 import json
 import logging
 from urllib3.util.retry import Retry
@@ -106,13 +106,7 @@ def main():
     session = Session()
     session.mount('https://', HTTPAdapter(max_retries=retries))
     
-    # Apply proxy if provided
-    request_kwargs = {'session': session}
-    if PROXY_URL:
-        request_kwargs['proxy_url'] = PROXY_URL
-        logger.info(f"Using proxy: {PROXY_URL}")
-    
-    updater = Updater(TOKEN, use_context=True, request_kwargs=request_kwargs)
+    updater = Updater(TOKEN, use_context=True, request_kwargs={'session': session})
     dp = updater.dispatcher
     bot = QuizBot()
 
