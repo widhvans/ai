@@ -1,1 +1,1 @@
-TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your BotFather token
+TOKEN = "5792496493:AAEdISosRZptqrYa-yNbO8R9zrat-L5TiIQ"  # Replace with your BotFather token
