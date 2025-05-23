@@ -1,8 +1,7 @@
 import telegram
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, PollHandler, JobQueue
-import requests
 import random
-from config import TOKEN, RAPIDAPI_KEY
+from config import TOKEN
 import json
 import logging
 import re
@@ -34,71 +33,13 @@ class QuizBot:
         self.user_data = {}
         self.question_timeout = 30  # Seconds per question
 
-    def call_prepai_api(self, text):
-        """Use PrepAI API for question generation."""
-        if not RAPIDAPI_KEY:
-            logger.warning("RapidAPI key missing. Falling back to NLTK.")
-            return None
-        try:
-            headers = {
-                "x-rapidapi-key": RAPIDAPI_KEY,
-                "x-rapidapi-host": "prepai-generate-questions.p.rapidapi.com",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "content": text,
-                "question_type": ["multiple_choice", "true_false", "fill_in_the_blank"],
-                "difficulty": "medium"
-            }
-            response = requests.post(
-                "https://prepai-generate-questions.p.rapidapi.com/generate",
-                json=payload,
-                headers=headers
-            )
-            response.raise_for_status()
-            data = response.json()
-            logger.debug(f"PrepAI API response: {data}")
-            return data.get('questions', [])
-        except Exception as e:
-            logger.error(f"PrepAI API error: {e}")
-            return None
-
     def extract_quiz_data(self, text):
-        """Generate quizzes from unstructured current affairs text."""
+        """Generate quizzes from unstructured Hindi/English current affairs text."""
         logger.debug(f"Processing input text: {text[:1000]}...")
-        quizzes = []
-
-        # Try PrepAI API first
-        prepai_questions = self.call_prepai_api(text)
-        if prepai_questions:
-            for q in prepai_questions[:10]:
-                question = q.get('question')
-                correct_answer = q.get('correct_answer')
-                options = q.get('options', [])
-                if question and correct_answer and len(options) >= 4:
-                    answers = options[:3] + [correct_answer]
-                    random.shuffle(answers)
-                    correct_idx = answers.index(correct_answer)
-                    quizzes.append({
-                        'question': question,
-                        'answers': answers,
-                        'correct': correct_idx
-                    })
-                    logger.debug(f"PrepAI quiz: {question} | Correct: {correct_answer}")
-        else:
-            logger.info("Using NLTK fallback for quiz generation")
-            quizzes.extend(self.fallback_quiz_extraction(text))
-
-        logger.debug(f"Generated {len(quizzes)} quizzes")
-        return quizzes[:10]
-
-    def fallback_quiz_extraction(self, text):
-        """Fallback method using NLTK for Hindi and English text."""
-        logger.debug("Using NLTK fallback quiz extraction")
         quizzes = []
         sentences = sent_tokenize(text)
         sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
-        logger.debug(f"Fallback: Extracted {len(sentences)} sentences")
+        logger.debug(f"Extracted {len(sentences)} sentences")
 
         hindi_keywords = {
             "उद्घाटन": "inaugurated",
@@ -110,10 +51,13 @@ class QuizBot:
             "किलोमीटर": "km",
             "सम्मानित": "honored",
             "परियोजना": "project",
-            "पुरस्कार": "awarded"
+            "पुरस्कार": "awarded",
+            "स्थान": "location",
+            "आयोजित": "organized",
+            "विजेता": "winner"
         }
 
-        stop_words = set(stopwords.words('english')).union(['है', 'के', 'में', 'से', 'का', 'की', 'को'])
+        stop_words = set(stopwords.words('english')).union(['है', 'के', 'में', 'से', 'का', 'की', 'को', 'ने', 'और'])
 
         for i, sentence in enumerate(sentences[:10]):
             question = None
@@ -121,50 +65,50 @@ class QuizBot:
             incorrect_answers = []
             sentence_lower = sentence.lower()
 
-            # Map Hindi keywords
+            # Map Hindi keywords to English
             for hindi, english in hindi_keywords.items():
                 sentence_lower = sentence_lower.replace(hindi, english)
 
             # Extract names and numbers
             tokens = word_tokenize(sentence)
-            names = [t for t in tokens if (t[0].isupper() or t[0] in 'ऀ-ॿ') and t not in stop_words]
+            names = [t for t in tokens if (t[0].isupper() or t[0] in 'ऀ-ॿ') and t not in stop_words and len(t) > 2]
             numbers = re.findall(r'\d+\.?\d*', sentence_lower)
             logger.debug(f"Sentence {i+1}: {sentence} | Names: {names} | Numbers: {numbers}")
 
             # Person-based questions
-            if names and any(k in sentence_lower for k in ["inaugurated", "launched", "started", "honored", "awarded"]):
+            if names and any(k in sentence_lower for k in ["inaugurated", "launched", "started", "honored", "awarded", "winner"]):
                 correct_answer = names[0]
-                question = f"Who was involved in the event mentioned in the news?"
+                question = "Who was involved in the event mentioned in the news?"
                 incorrect_answers = names[1:3] if len(names) > 1 else []
                 incorrect_answers.extend(["Rahul Gandhi", "Amit Shah", "Sonia Gandhi"][:3-len(incorrect_answers)])
-                logger.debug(f"Fallback: Generated person-based question: {question}")
+                logger.debug(f"Generated person-based question: {question}")
 
             # Numeric questions
             elif numbers:
                 number = numbers[0]
                 if "crore" in sentence_lower:
-                    question = f"What is the approximate budget mentioned in the news?"
+                    question = "What is the approximate budget mentioned in the news?"
                     correct_answer = f"{number} crore"
                     incorrect_answers = [f"{float(number)*2} crore", f"{float(number)/2} crore", f"{float(number)+100} crore"]
-                    logger.debug(f"Fallback: Generated crore-based question: {question}")
+                    logger.debug(f"Generated crore-based question: {question}")
                 elif any(k in sentence_lower for k in ["percent", "%"]):
-                    question = f"What is the projected percentage value mentioned in the news?"
+                    question = "What is the projected percentage value mentioned in the news?"
                     correct_answer = f"{number}%"
                     incorrect_answers = [f"{float(number)+1}%", f"{float(number)-1}%", f"{float(number)+2}%"]
-                    logger.debug(f"Fallback: Generated percent-based question: {question}")
+                    logger.debug(f"Generated percent-based question: {question}")
                 elif "km" in sentence_lower:
-                    question = f"What is the length of the project mentioned in the news?"
+                    question = "What is the length of the project mentioned in the news?"
                     correct_answer = f"{number} km"
                     incorrect_answers = [f"{float(number)*2} km", f"{float(number)/2} km", f"{float(number)+10} km"]
-                    logger.debug(f"Fallback: Generated km-based question: {question}")
+                    logger.debug(f"Generated km-based question: {question}")
 
             # Location-based questions
-            elif names and any(k in sentence_lower for k in ["project", "stadium", "center"]):
+            elif names and any(k in sentence_lower for k in ["project", "stadium", "center", "location", "organized"]):
                 correct_answer = names[0]
-                question = f"In which location was the project or event mentioned in the news held?"
+                question = "In which location was the project or event mentioned in the news held?"
                 incorrect_answers = names[1:3] if len(names) > 1 else []
                 incorrect_answers.extend(["Delhi", "Kolkata", "Chennai"][:3-len(incorrect_answers)])
-                logger.debug(f"Fallback: Generated location-based question: {question}")
+                logger.debug(f"Generated location-based question: {question}")
 
             if question and correct_answer and len(incorrect_answers) >= 3:
                 answers = incorrect_answers[:3] + [correct_answer]
@@ -175,8 +119,9 @@ class QuizBot:
                     'answers': answers,
                     'correct': correct_idx
                 })
-                logger.debug(f"Fallback: Added quiz: {question} | Correct: {correct_answer}")
+                logger.debug(f"Added quiz: {question} | Correct: {correct_answer}")
 
+        logger.debug(f"Generated {len(quizzes)} quizzes")
         return quizzes[:10]
 
     def start(self, update, context):
@@ -207,7 +152,6 @@ class QuizBot:
         self.user_data[chat_id] = {'score': 0, 'total': len(self.quizzes)}
         logger.info(f"Starting quiz in chat {chat_id} with {len(self.quizzes)} questions")
         
-        # Start quiz immediately
         self.send_quiz(context, {'chat_id': chat_id, 'update': update})
 
     def send_quiz(self, context, job_context):
