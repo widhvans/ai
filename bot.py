@@ -2,7 +2,7 @@ import telegram
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, PollHandler, JobQueue
 import requests
 import random
-from config import TOKEN, OPEXAMS_API_KEY
+from config import TOKEN, QUILLIONZ_API_KEY
 import json
 import logging
 import re
@@ -34,35 +34,33 @@ class QuizBot:
         self.user_data = {}
         self.question_timeout = 30  # Seconds per question
 
-    def call_opexams_api(self, text):
-        """Use OpExams API for question generation."""
-        if not OPEXAMS_API_KEY:
-            logger.warning("OpExams API key missing. Falling back to NLTK.")
+    def call_quillionz_api(self, text):
+        """Use Quillionz API for question generation."""
+        if not QUILLIONZ_API_KEY:
+            logger.warning("Quillionz API key missing. Falling back to NLTK.")
             return None
         try:
             headers = {
-                "x-rapidapi-key": OPEXAMS_API_KEY,
-                "x-rapidapi-host": "opexams-questions-generator.p.rapidapi.com",
+                "Authorization": f"Bearer {QUILLIONZ_API_KEY}",
                 "Content-Type": "application/json"
             }
             payload = {
-                "content": text,
+                "text": text,
                 "language": "auto",
                 "question_types": ["multiple_choice", "true_false"],
-                "difficulty": "medium",
                 "max_questions": 10
             }
             response = requests.post(
-                "https://opexams-questions-generator.p.rapidapi.com/generate",
+                "https://api.quillionz.com/v1/questions/generate",
                 json=payload,
                 headers=headers
             )
             response.raise_for_status()
             data = response.json()
-            logger.debug(f"OpExams API response: {data}")
+            logger.debug(f"Quillionz API response: {data}")
             return data.get('questions', [])
         except Exception as e:
-            logger.error(f"OpExams API error: {e}")
+            logger.error(f"Quillionz API error: {e}")
             return None
 
     def extract_quiz_data(self, text):
@@ -70,10 +68,10 @@ class QuizBot:
         logger.debug(f"Processing input text: {text[:1000]}...")
         quizzes = []
 
-        # Try OpExams API first
-        opexams_questions = self.call_opexams_api(text)
-        if opexams_questions:
-            for q in opexams_questions[:10]:
+        # Try Quillionz API first
+        quillionz_questions = self.call_quillionz_api(text)
+        if quillionz_questions:
+            for q in quillionz_questions[:10]:
                 question = q.get('question')
                 correct_answer = q.get('correct_answer')
                 options = q.get('options', [])
@@ -86,7 +84,7 @@ class QuizBot:
                         'answers': answers,
                         'correct': correct_idx
                     })
-                    logger.debug(f"OpExams quiz: {question} | Correct: {correct_answer}")
+                    logger.debug(f"Quillionz quiz: {question} | Correct: {correct_answer}")
         else:
             logger.info("Using NLTK fallback for quiz generation")
             quizzes.extend(self.fallback_quiz_extraction(text))
@@ -115,10 +113,12 @@ class QuizBot:
             "पुरस्कार": "awarded",
             "स्थान": "location",
             "विकास": "development",
-            "अनुमान": "estimated"
+            "अनुमान": "estimated",
+            "संगठन": "organization",
+            "रिपोर्ट": "report"
         }
 
-        stop_words = set(stopwords.words('english')).union(['है', 'के', 'में', 'से', 'का', 'की', 'को', 'ने', 'और'])
+        stop_words = set(stopwords.words('english')).union(['है', 'के', 'में', 'से', 'का', 'की', 'को', 'ने', 'और', 'पर'])
 
         for i, sentence in enumerate(sentences[:10]):
             question = None
@@ -170,6 +170,14 @@ class QuizBot:
                 incorrect_answers = names[1:3] if len(names) > 1 else []
                 incorrect_answers.extend(["Delhi", "Kolkata", "Chennai"][:3-len(incorrect_answers)])
                 logger.debug(f"Fallback: Generated location-based question: {question}")
+
+            # Organization-based questions
+            elif names and any(k in sentence_lower for k in ["collaborated", "organization", "report"]):
+                correct_answer = names[0]
+                question = f"Which organization was involved in the {hindi_keywords.get('सहयोग', 'collaboration')} or {hindi_keywords.get('रिपोर्ट', 'report')} mentioned in the news?"
+                incorrect_answers = names[1:3] if len(names) > 1 else []
+                incorrect_answers.extend(["TCS", "Infosys", "Wipro"][:3-len(incorrect_answers)])
+                logger.debug(f"Fallback: Generated organization-based question: {question}")
 
             # Event-based true/false questions
             elif any(k in sentence_lower for k in ["inaugurated", "launched", "started", "estimated"]):
