@@ -2,7 +2,7 @@ import telegram
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, PollHandler, JobQueue
 import requests
 import random
-from config import TOKEN, XAI_API_KEY
+from config import TOKEN, RAPIDAPI_KEY
 import json
 import logging
 import re
@@ -34,26 +34,33 @@ class QuizBot:
         self.user_data = {}
         self.question_timeout = 30  # Seconds per question
 
-    def call_xai_api(self, text):
-        """Use xAI API for text analysis."""
-        if not XAI_API_KEY:
-            logger.warning("xAI API key missing. Falling back to NLTK.")
+    def call_prepai_api(self, text):
+        """Use PrepAI API for question generation."""
+        if not RAPIDAPI_KEY:
+            logger.warning("RapidAPI key missing. Falling back to NLTK.")
             return None
         try:
-            headers = {"Authorization": f"Bearer {XAI_API_KEY}"}
-            payload = {
-                "model": "grok-3",
-                "messages": [{
-                    "role": "user",
-                    "content": f"Extract key facts (names, numbers, events, locations) from this text for quiz generation. Support Hindi and English. Output as JSON: {text}"
-                }]
+            headers = {
+                "x-rapidapi-key": RAPIDAPI_KEY,
+                "x-rapidapi-host": "prepai-generate-questions.p.rapidapi.com",
+                "Content-Type": "application/json"
             }
-            response = requests.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers)
+            payload = {
+                "content": text,
+                "question_type": ["multiple_choice", "true_false", "fill_in_the_blank"],
+                "difficulty": "medium"
+            }
+            response = requests.post(
+                "https://prepai-generate-questions.p.rapidapi.com/generate",
+                json=payload,
+                headers=headers
+            )
             response.raise_for_status()
             data = response.json()
-            return data['choices'][0]['message']['content']
+            logger.debug(f"PrepAI API response: {data}")
+            return data.get('questions', [])
         except Exception as e:
-            logger.error(f"xAI API error: {e}")
+            logger.error(f"PrepAI API error: {e}")
             return None
 
     def extract_quiz_data(self, text):
@@ -61,58 +68,29 @@ class QuizBot:
         logger.debug(f"Processing input text: {text[:1000]}...")
         quizzes = []
 
-        # Try xAI API first
-        xai_result = self.call_xai_api(text)
-        if xai_result:
-            try:
-                facts = json.loads(xai_result)
-                logger.debug(f"xAI extracted facts: {facts}")
-                quizzes.extend(self.generate_quizzes_from_facts(facts))
-            except json.JSONDecodeError:
-                logger.error("Invalid JSON from xAI API. Using fallback.")
+        # Try PrepAI API first
+        prepai_questions = self.call_prepai_api(text)
+        if prepai_questions:
+            for q in prepai_questions[:10]:
+                question = q.get('question')
+                correct_answer = q.get('correct_answer')
+                options = q.get('options', [])
+                if question and correct_answer and len(options) >= 4:
+                    answers = options[:3] + [correct_answer]
+                    random.shuffle(answers)
+                    correct_idx = answers.index(correct_answer)
+                    quizzes.append({
+                        'question': question,
+                        'answers': answers,
+                        'correct': correct_idx
+                    })
+                    logger.debug(f"PrepAI quiz: {question} | Correct: {correct_answer}")
         else:
             logger.info("Using NLTK fallback for quiz generation")
             quizzes.extend(self.fallback_quiz_extraction(text))
 
         logger.debug(f"Generated {len(quizzes)} quizzes")
         return quizzes[:10]
-
-    def generate_quizzes_from_facts(self, facts):
-        """Generate quizzes from xAI API facts."""
-        quizzes = []
-        for fact in facts.get('facts', []):
-            question = None
-            correct_answer = None
-            incorrect_answers = []
-
-            if fact.get('type') == 'person' and fact.get('context') in ['inaugurated', 'launched', 'started']:
-                question = f"Who {fact['context']} the event mentioned in the news?"
-                correct_answer = fact['value']
-                incorrect_answers = ["Rahul Gandhi", "Amit Shah", "Sonia Gandhi"]
-            elif fact.get('type') == 'location' and fact.get('context') in ['project', 'event', 'stadium']:
-                question = f"In which location was the {fact['context']} mentioned in the news held?"
-                correct_answer = fact['value']
-                incorrect_answers = ["Delhi", "Kolkata", "Chennai"]
-            elif fact.get('type') == 'number' and fact.get('unit') == 'crore':
-                question = f"What is the approximate budget mentioned in the news?"
-                correct_answer = f"{fact['value']} crore"
-                incorrect_answers = [f"{float(fact['value'])*2} crore", f"{float(fact['value'])/2} crore", f"{float(fact['value'])+100} crore"]
-            elif fact.get('type') == 'number' and fact.get('unit') in ['percent', '%']:
-                question = f"What is the projected percentage value mentioned in the news?"
-                correct_answer = f"{fact['value']}%"
-                incorrect_answers = [f"{float(fact['value'])+1}%", f"{float(fact['value'])-1}%", f"{float(fact['value'])+2}%"]
-
-            if question and correct_answer and len(incorrect_answers) >= 3:
-                answers = incorrect_answers[:3] + [correct_answer]
-                random.shuffle(answers)
-                correct_idx = answers.index(correct_answer)
-                quizzes.append({
-                    'question': question,
-                    'answers': answers,
-                    'correct': correct_idx
-                })
-                logger.debug(f"xAI quiz: {question} | Correct: {correct_answer}")
-        return quizzes
 
     def fallback_quiz_extraction(self, text):
         """Fallback method using NLTK for Hindi and English text."""
@@ -131,7 +109,8 @@ class QuizBot:
             "करोड़": "crore",
             "किलोमीटर": "km",
             "सम्मानित": "honored",
-            "परियोजना": "project"
+            "परियोजना": "project",
+            "पुरस्कार": "awarded"
         }
 
         stop_words = set(stopwords.words('english')).union(['है', 'के', 'में', 'से', 'का', 'की', 'को'])
@@ -146,14 +125,14 @@ class QuizBot:
             for hindi, english in hindi_keywords.items():
                 sentence_lower = sentence_lower.replace(hindi, english)
 
-            # Tokenize and extract names
+            # Extract names and numbers
             tokens = word_tokenize(sentence)
-            names = [t for t in tokens if t[0].isupper() or t[0] in 'ऀ-ॿ' and t not in stop_words]
+            names = [t for t in tokens if (t[0].isupper() or t[0] in 'ऀ-ॿ') and t not in stop_words]
             numbers = re.findall(r'\d+\.?\d*', sentence_lower)
             logger.debug(f"Sentence {i+1}: {sentence} | Names: {names} | Numbers: {numbers}")
 
             # Person-based questions
-            if names and any(k in sentence_lower for k in ["inaugurated", "launched", "started", "honored"]):
+            if names and any(k in sentence_lower for k in ["inaugurated", "launched", "started", "honored", "awarded"]):
                 correct_answer = names[0]
                 question = f"Who was involved in the event mentioned in the news?"
                 incorrect_answers = names[1:3] if len(names) > 1 else []
@@ -178,6 +157,14 @@ class QuizBot:
                     correct_answer = f"{number} km"
                     incorrect_answers = [f"{float(number)*2} km", f"{float(number)/2} km", f"{float(number)+10} km"]
                     logger.debug(f"Fallback: Generated km-based question: {question}")
+
+            # Location-based questions
+            elif names and any(k in sentence_lower for k in ["project", "stadium", "center"]):
+                correct_answer = names[0]
+                question = f"In which location was the project or event mentioned in the news held?"
+                incorrect_answers = names[1:3] if len(names) > 1 else []
+                incorrect_answers.extend(["Delhi", "Kolkata", "Chennai"][:3-len(incorrect_answers)])
+                logger.debug(f"Fallback: Generated location-based question: {question}")
 
             if question and correct_answer and len(incorrect_answers) >= 3:
                 answers = incorrect_answers[:3] + [correct_answer]
@@ -237,7 +224,6 @@ class QuizBot:
 
         quiz = self.quizzes[self.current_quiz]
         try:
-            # Send poll
             message = context.bot.send_poll(
                 chat_id=chat_id,
                 question=quiz['question'],
@@ -251,7 +237,6 @@ class QuizBot:
             context.bot_data[message.poll.id] = chat_id
             logger.info(f"Sent quiz {self.current_quiz+1}/{len(self.quizzes)} to chat {chat_id}: {quiz['question']}")
 
-            # Send timer message
             timer_message = context.bot.send_message(
                 chat_id=chat_id,
                 text=f"Time remaining: {self.question_timeout} seconds"
@@ -267,7 +252,6 @@ class QuizBot:
                 name=f"timer_{chat_id}_{self.current_quiz}"
             )
 
-            # Schedule next quiz
             self.current_quiz += 1
             if self.current_quiz < len(self.quizzes):
                 context.job_queue.run_once(
