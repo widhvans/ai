@@ -5,9 +5,6 @@ import random
 from config import TOKEN
 import json
 import logging
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
-from requests import Session
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -101,12 +98,7 @@ class QuizBot:
             self.send_quiz(update, context, chat_id)
 
 def main():
-    # Configure retries for network requests
-    retries = Retry(total=5, backoff_factor=2, status_forcelist=[429, 500, 502, 503, 504])
-    session = Session()
-    session.mount('https://', HTTPAdapter(max_retries=retries))
-    
-    updater = Updater(TOKEN, use_context=True, request_kwargs={'session': session})
+    updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
     bot = QuizBot()
 
