@@ -10,8 +10,12 @@ import re
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load spaCy model for English (since the input may be multilingual, we'll focus on English translation or key entities)
-nlp = spacy.load("en_core_web_sm")
+# Load spaCy model with error handling
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError as e:
+    logger.error(f"Failed to load spaCy model: {e}")
+    nlp = None
 
 class QuizBot:
     def __init__(self):
@@ -21,32 +25,32 @@ class QuizBot:
 
     def extract_quiz_data(self, text):
         """Generate quizzes from unstructured current affairs text."""
+        if not nlp:
+            logger.error("spaCy model not available. Using fallback method.")
+            return self.fallback_quiz_extraction(text)
+        
         doc = nlp(text)
         quizzes = []
         
-        # Extract sentences and key entities (e.g., people, organizations, locations, dates)
+        # Extract sentences and key entities
         sentences = [sent.text.strip() for sent in doc.sents if len(sent.text.strip()) > 20]
         entities = [(ent.text, ent.label_) for ent in doc.ents]
 
-        # Generate up to 10 quizzes based on sentences and entities
-        for i, sentence in enumerate(sentences[:10]):  # Limit to 10
-            # Find entities in the sentence
+        # Generate up to 10 quizzes
+        for i, sentence in enumerate(sentences[:10]):
             sent_doc = nlp(sentence)
             sent_entities = [(ent.text, ent.label_) for ent in sent_doc.ents]
             
-            # Create a question based on an entity or fact
             question = None
             correct_answer = None
             incorrect_answers = []
             
-            # Strategy 1: Question about a person, place, or organization
+            # Strategy 1: Entity-based questions
             for entity, label in sent_entities:
                 if label in ["PERSON", "GPE", "ORG", "DATE", "EVENT"]:
-                    # Example: "Who inaugurated 103 redeveloped railway stations?"
                     if label == "PERSON" and "inaugurat" in sentence.lower():
                         question = f"Who inaugurated the event or project mentioned in the news on {entity}?"
                         correct_answer = entity
-                        # Generate incorrect options (other people from text or generic names)
                         incorrect_answers = [e[0] for e in entities if e[1] == "PERSON" and e[0] != entity]
                         incorrect_answers.extend(["Rahul Gandhi", "Amit Shah", "Sonia Gandhi"][:3-len(incorrect_answers)])
                         break
@@ -63,7 +67,7 @@ class QuizBot:
                         incorrect_answers.extend(["TCS", "Infosys", "Wipro"][:3-len(incorrect_answers)])
                         break
 
-            # Strategy 2: Numeric or factual question
+            # Strategy 2: Numeric questions
             if not question:
                 numbers = re.findall(r'\d+\.?\d*', sentence)
                 if numbers and any(keyword in sentence.lower() for keyword in ["crore", "percent", "km"]):
@@ -88,7 +92,43 @@ class QuizBot:
                     'correct': correct_idx
                 })
 
-        return quizzes[:10]  # Limit to 10 quizzes
+        return quizzes[:10]
+
+    def fallback_quiz_extraction(self, text):
+        """Fallback method to generate quizzes without spaCy."""
+        quizzes = []
+        sentences = re.split(r'\n|\.\s+', text)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+        for sentence in sentences[:10]:
+            question = None
+            correct_answer = None
+            incorrect_answers = []
+
+            # Simple numeric-based questions
+            numbers = re.findall(r'\d+\.?\d*', sentence)
+            if numbers and any(keyword in sentence.lower() for keyword in ["crore", "percent", "km"]):
+                number = numbers[0]
+                if "crore" in sentence.lower():
+                    question = f"What is the approximate budget mentioned in the news?"
+                    correct_answer = f"{number} crore"
+                    incorrect_answers = [f"{int(number)*2} crore", f"{int(number)//2} crore", f"{int(number)+100} crore"]
+                elif "percent" in sentence.lower():
+                    question = f"What is the projected percentage value mentioned?"
+                    correct_answer = f"{number}%"
+                    incorrect_answers = [f"{float(number)+1}%", f"{float(number)-1}%", f"{float(number)+2}%"]
+
+            if question and correct_answer:
+                answers = incorrect_answers[:3] + [correct_answer]
+                random.shuffle(answers)
+                correct_idx = answers.index(correct_answer)
+                quizzes.append({
+                    'question': question,
+                    'answers': answers,
+                    'correct': correct_idx
+                })
+
+        return quizzes[:10]
 
     def start(self, update, context):
         update.message.reply_text("Send current affairs text, and I'll generate quizzes automatically. Use /generate to start quizzes in this chat.")
@@ -98,7 +138,6 @@ class QuizBot:
         self.quizzes = self.extract_quiz_data(text)
         if self.quizzes:
             update.message.reply_text(f"Generated {len(self.quizzes)} quizzes. Use /generate to start.")
-            # Save quizzes to a file
             with open('quizzes.json', 'w') as f:
                 json.dump(self.quizzes, f)
         else:
